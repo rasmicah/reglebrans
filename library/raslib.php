@@ -32,9 +32,7 @@ class MySqlClient
 	
 	function __destruct()
 	{
-		if(!$this->isConnected()){	
-			return $this->adapter->close();	
-		}	
+		$this->disconnect();	
 	}	
 	
 	private function isConnected()
@@ -62,17 +60,23 @@ class MySqlClient
 	}
 	
 	public function connect()
-	{
-		
-		if($this->adapter->real_connect($this->host, $this->user, $this->password, $this->database))
-			return true;
-		else
-			throw new Exception("MySqli Connection failed");
+	{	
+		try {
+			if(!$this->isConnected()) {
+				if(@$this->adapter->real_connect($this->host, $this->user, $this->password, $this->database))
+					return true;
+				else
+					return false;
+			} else
+				return true;
+		} catch (Exception $ex) {	
+			throw new Exception($ex->getMessage());
+		}
 	}
 	
 	public function disconnect()
 	{
-		if(!$this->isConnected()){	
+		if($this->isConnected()){	
 			$this->adapter->close();	
 		}			
 	}	
@@ -98,21 +102,25 @@ class MySqlClient
 				$this->queryType = 'invalid';
 				throw new Exception('Invalid Query Type: ' . $queryType);
 		}
-		$this->query = $queryString;			
+		$this->query = escape($queryString);			
 	}
 	
 	public function executeQuery()
 	{
-		if(!$this->isConnected()){		
-			$msg = "Database connection not established";
-			throw new NullConnectionException($msg);
-		}
+		$this->connect();		
 		if($this->query == null){
 			$msg = "Query String not set";
 			throw new NullQueryException($msg);
+		}	
+		try {
+			
+			$this->result = @$this->adapter->query($this->escape($this->query));
+		} catch (Exception $ex) {
+			$this->disconnect();
+			throw new Exception($ex->getMessage());
 		}		
-		$this->result = $this->adapter->query($this->query);
 		$this->query = null;
+		$this->queryType = null;
 		if($this->adapter->errno){
 			throw new Exception($this->adapter->error);
 		}
@@ -123,49 +131,93 @@ class MySqlClient
 				return $this->getAffectedRows();				
 			case 'select':				
 				return $this->getNumRows();
-		}		
+		}
+		$this->disconnect();		
 	}
-	private function prepareQueryFields($fields)
+	
+	
+	public function prepareInsertQuery($table, $fields, $values)
 	{
-		if(is_array($fields)) {
-			$numFields = count(fields);
-			$preparedFields = "(";
-			for($counter = 0; $counter < $numFields; $counter++){
-				$preparedFields .= "$fields[$counter]";
-				if($counter < ($numfields - 2)){
-					$preparedFields = ",";
-				}
+		if(is_array($fields) && is_array($values)) {
+			$numFields = count($fields);
+			$numValues = count($values);			
+			if($numFields == $numValues){
+				$preparedFields = "(";
+				$preparedValues = " VALUES (";
+				for($counter = 0; $counter < $numFields; $counter++){
+					$preparedFields .= "$fields[$counter]"; 
+					$preparedValues .= "'$values[$counter]'";
+					if($counter < ($numFields - 1)){
+						$preparedFields .= ", ";
+						$preparedValues .= ", ";
+					}
+				}				
+				$preparedFields .= ")";
+				$preparedValues .= ")";
+				$this->queryType = "insert";
+				$this->query = "INSERT INTO $table " . $preparedFields . $preparedValues;				
+			} else {
+				throw new Exception("The number of fields not equal to the number of values");
 			}
-			$preparedFields = ")";
-			return $preparedFields;
 		} else {
-			throw new Exception("Invalid parameter! array expected");
+			throw new Exception("Invalid parameter! array expected in parameter 2 and 3");
 		}
 	}
 	
-	public function prepareQuery($queryType, $table, $fields = null, $values = null, $criteria = null)
+	public function prepareUpdateQuery($table, $fields, $values, $criteria = null)
 	{
-		switch(strtolower($queryType)){
-			case 'insert':
-			"INSERT INTO $table ()";
-				$this->queryType = 'insert';
-				break;
-			case 'update':
-				$this->queryType = 'update';
-				break;
-			case 'delete':
-				$this->queryType = 'delete';
-				break;
-			case 'select':
-				$this->queryType = 'select';
-				break;
-			default:
-				$this->queryType = 'invalid';
-				throw new Exception('Invalid Query Type: ' . $queryType);
+		if(is_array($fields) && is_array($values)) {
+			$numFields = count($fields);
+			$numValues = count($values);
+			if($numFields == $numValues){
+				$preparedStatement = "UPDATE $table SET ";				
+				for($counter = 0; $counter < $numFields; $counter++){
+					$preparedStatement .= "$fields[$counter] = '$values[$counter]'";					
+					if($counter < ($numFields - 1)){
+						$preparedStatement .= ", ";						
+					}
+				}
+				$preparedStatement = ($criteria == null) ? $preparedStatement : $preparedStatement . " WHERE " . $criteria;				
+				$this->queryType = "update";
+				$this->query = $preparedStatement;				
+			} else {
+				throw new Exception("The number of fields not equal to the number of values");
+			}
+		} else {
+			throw new Exception("Invalid parameter! array expected in parameter 2 and 3");
 		}
-		$this->query = $queryString;	
+	}
+	
+	public function prepareDeleteQuery($table, $criteria = null)
+	{
+		$this->queryType = "delete";
+		$this->query = ($criteria == null) ? "DELETE FROM $table" : "DELETE FROM $table WHERE $criteria";
 	}
 
+	public function prepareSelectQuery($table, $fields = null, $criteria = null)
+	{
+		$preparedStatement = "SELECT ";
+		if($fields != null){
+			if(is_array($fields)) {
+				$numFields = count($fields);
+				$preparedFields = "";
+				for($counter = 0; $counter < $numFields; $counter++){
+					$preparedFields .= "$fields[$counter]";				
+					if($counter < ($numFields - 1)){
+						$preparedFields .= ", ";					
+					}
+				}
+				$preparedStatement .= $preparedFields . " FROM $table";
+			} else {
+				throw new Exception("Invalid parameter! array expected in parameter 1");
+			}			
+		} else {
+			$preparedStatement .= "* FROM $table"; 
+		}	
+		$this->queryType = "select";
+		$this->query = ($criteria == null) ? $preparedStatement : $preparedStatement . " WHERE $criteria";
+	}
+	
 	public function fetch($type = 'array')
 	{
 		$type = strtolower($type);
@@ -176,8 +228,7 @@ class MySqlClient
 		switch($type)
 		{			
 			case 'array':
-				{
-					
+				{					
 					$index = -1;
 					while($row = $this->result->fetch_array(MYSQLI_ASSOC))
 					{
